@@ -1,0 +1,52 @@
+---
+title: "P8105 Final Project Proposal"
+subtitle: "Cold Apartments: NYC Heat Complaints, Temperature, and Inequality"
+date: "November 13, 2026"
+output: github_document
+fontsize: 10pt
+geometry: margin=0.65in
+header-includes:
+  - \usepackage{titlesec}
+  - \titlespacing*{\section}{0pt}{4pt}{2pt}
+  - \usepackage{enumitem}
+  - \setlist[itemize]{nosep,topsep=0pt}
+  - \setlength{\parskip}{2pt}
+  - \setlength{\parindent}{0pt}
+---
+
+## Group Members
+ Zhenghong Chen (zc2959); Xinyan Xu (xx2554); Changshen Chen (cc5604); Yan Peng (yp2846); Tianqing Wang (tw3131)
+
+## Motivation
+
+Despite NYC's heating regulations, inadequate heating remains a widespread problem. According to [NYC HPD](https://www.nyc.gov/site/hpd/services-and-information/heat-and-hot-water-information.page), the city recorded approximately 344,000 heat complaints during the 2025–26 heating season, compared with 283,000 the previous season. This issue also resonates with our group through a member's personal experience with delayed heating repairs. Beyond everyday inconvenience, inadequate heating raises public health concerns, as [Siegel et al. (2024)](https://doi.org/10.1377/hlthaff.2023.01052) found associations between energy insecurity and respiratory, mental health, and cardiovascular conditions.
+
+However, complaint counts alone do not tell the full story. Higher numbers may reflect colder weather, neighborhood socioeconomic differences, or variations in complaint handling. Our project aims to explore these factors to better understand patterns and inequalities in NYC heating complaints.
+
+## Intended Final Products
+
+A project website on GitHub Pages with our exploratory analysis, results, and an interactive dashboard; the full report as a page on the site; a two-minute screencast embedded on the home page; and a GitHub repository with all code.
+
+## Anticipated Data Sources
+
+- **[311 Service Requests from 2020 to Present](https://data.cityofnewyork.us/Social-Services/311-Service-Requests-from-2020-to-Present/erm2-nwe9/about_data):** Heat complaints, dates, ZIP codes, BBLs, and closure details.
+- **[HPD Housing Maintenance Code Violations](https://data.cityofnewyork.us/Housing-Development/Housing-Maintenance-Code-Violations/wvxf-dwi5/about_data):** Heat-related violations by BBL.
+- **[NOAA Global Historical Climatology Network Daily](https://www.ncei.noaa.gov/products/land-based-station/global-historical-climatology-network-daily):** Daily temperatures at Central Park.
+- **[American Community Survey 5-year estimates](https://data.census.gov):** Renter households, poverty rates, and median income by ZCTA.
+- **[NYC PLUTO](https://data.cityofnewyork.us/d/64uk-42ks):** Building age and residential units by BBL.
+
+## Planned Analyses, Visualizations, and Coding Challenges
+
+We plan to use negative binomial regression on data from the 2020–21 to 2024–25 heating seasons to examine the relationship between temperature and daily heat complaints, then compare predicted and observed counts for the 2025–26 season. We will also analyze how complaint rates relate to neighborhood poverty and building age, and compare complaint closure times and reasons across income groups.
+
+Planned visualizations include time trends, predicted versus observed complaints, geographic maps of complaint rates, and an interactive Plotly dashboard.
+
+The main coding challenges involve managing large 311 datasets and integrating data from different sources. We will use the NYC Open Data API to retrieve relevant complaints by heating season and match ZIP codes with Census ZCTAs for neighborhood-level analysis. Since these geographic units do not align perfectly, we will carefully handle unmatched areas and areas with small renter populations.
+
+## Planned Timeline
+
+**Nov 13–20:** Proposal submission, repository setup, data import, and project review.  
+**Nov 21–29:** Data cleaning and integration.  
+**Nov 30–Dec 5:** Exploratory analysis and visualizations.  
+**Dec 6–9:** Statistical modeling and additional analyses.  
+**Dec 10–12:** Website, report, screencast, and final submission.
