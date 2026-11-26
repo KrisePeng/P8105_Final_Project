@@ -1,0 +1,136 @@
+---
+title: "311 Heat Complaints: API Verification"
+output: github_document
+---
+
+This file checks the NYC 311 Service Requests API before we download any record-level data. It confirms the field names, the complaint types related to heat, the number of HEAT/HOT WATER requests in each heating season, and how those requests split between heat and hot water.
+
+Data source: [311 Service Requests from 2020 to Present](https://data.cityofnewyork.us/Social-Services/311-Service-Requests-from-2020-to-Present/erm2-nwe9/about_data) (NYC Open Data, dataset ID `erm2-nwe9`).
+
+```{r setup, message = FALSE}
+library(tidyverse)
+library(httr)
+
+base_url = "https://data.cityofnewyork.us/resource/erm2-nwe9.csv"
+retrieval_date = Sys.Date()
+```
+
+## Field names
+
+```{r peek}
+peek_response = GET(base_url, query = list("$limit" = 5))
+
+status_code(peek_response)
+
+peek_311 = content(peek_response, "parsed")
+
+names(peek_311)
+```
+
+## Complaint types related to heat
+
+```{r heat_types}
+heat_types =
+  GET(base_url, query = list(
+    "$select" = "complaint_type, count(*) AS n",
+    "$where"  = "upper(complaint_type) like '%HEAT%' AND created_date >= '2020-10-01T00:00:00'",
+    "$group"  = "complaint_type")) |>
+  content("parsed")
+
+heat_types
+```
+
+## HEAT/HOT WATER requests by heating season
+
+Each heating season runs from October 1 through May 31. The end date is set to June 1 with a strict `<` so that all of May 31 is included.
+
+```{r season_counts}
+season_bounds =
+  tibble(
+    season = str_c(2020:2025, "-", 21:26),
+    start  = str_c(2020:2025, "-10-01T00:00:00"),
+    end    = str_c(2021:2026, "-06-01T00:00:00"))
+
+count_heat = function(start, end) {
+
+  where_clause =
+    str_c("complaint_type = 'HEAT/HOT WATER' AND created_date >= '", start,
+          "' AND created_date < '", end, "'")
+
+  GET(base_url, query = list("$select" = "count(*) AS n", "$where" = where_clause)) |>
+    content("parsed") |>
+    pull(n)
+}
+
+season_counts =
+  season_bounds |>
+  mutate(n_api = map2_dbl(start, end, count_heat))
+
+season_counts
+```
+
+## Heat versus hot water in 2025-26
+
+```{r descriptor_split}
+descriptor_2526 =
+  GET(base_url, query = list(
+    "$select" = "descriptor, count(*) AS n",
+    "$where"  = "complaint_type = 'HEAT/HOT WATER' AND created_date >= '2025-10-01T00:00:00' AND created_date < '2026-06-01T00:00:00'",
+    "$group"  = "descriptor")) |>
+  content("parsed")
+
+descriptor_2526
+```
+
+## Follow-up checks
+
+The first run showed that `descriptor` records the scope of a complaint (`APARTMENT ONLY` or `ENTIRE BUILDING`), not whether it is about heat or hot water. It also showed a second spelling, `Heat/Hot Water`. The checks below count complaints case-insensitively and look at `descriptor_2`, which may hold the heat versus hot water detail.
+
+```{r season_counts_upper}
+count_heat_upper = function(start, end) {
+
+  where_clause =
+    str_c("upper(complaint_type) = 'HEAT/HOT WATER' AND created_date >= '", start,
+          "' AND created_date < '", end, "'")
+
+  GET(base_url, query = list("$select" = "count(*) AS n", "$where" = where_clause)) |>
+    content("parsed", show_col_types = FALSE) |>
+    pull(n)
+}
+
+season_counts =
+  season_counts |>
+  mutate(
+    n_api_upper = map2_dbl(start, end, count_heat_upper),
+    n_other_case = n_api_upper - n_api)
+
+season_counts |>
+  select(season, n_api, n_api_upper, n_other_case)
+```
+
+```{r descriptor_2_by_season}
+count_descriptor_2 = function(start, end) {
+
+  where_clause =
+    str_c("upper(complaint_type) = 'HEAT/HOT WATER' AND created_date >= '", start,
+          "' AND created_date < '", end, "'")
+
+  GET(base_url, query = list(
+    "$select" = "descriptor_2, count(*) AS n",
+    "$where"  = where_clause,
+    "$group"  = "descriptor_2")) |>
+    content("parsed", show_col_types = FALSE)
+}
+
+descriptor_2_counts =
+  season_bounds |>
+  mutate(counts = map2(start, end, count_descriptor_2)) |>
+  select(season, counts) |>
+  unnest(counts)
+
+descriptor_2_counts
+```
+
+## Provenance
+
+Queries were run on `r retrieval_date`. Across the six heating seasons from 2020-21 to 2025-26, the API returned `r format(sum(season_counts$n_api_upper), big.mark = ",")` HEAT/HOT WATER service requests (case-insensitive match).
