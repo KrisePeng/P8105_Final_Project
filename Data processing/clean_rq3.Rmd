@@ -1,0 +1,243 @@
+---
+title: "RQ3 Cleaning: Closure Time and Closure Type"
+output: github_document
+---
+
+This file prepares the complaint-level data for RQ3: are heat complaints
+handled differently in lower-income neighborhoods? It reads the six raw
+season files made by `download_311.Rmd`, computes how long each
+complaint took to close, checks data quality, and sorts the free-text
+`resolution_description` into closure types. Income groups (ACS) and
+building size (PLUTO) are added later, in the RQ3 analysis file.
+
+```{r setup, message = FALSE}
+library(tidyverse)
+library(lubridate)
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+raw_dir = "data/raw"
+processed_dir = "data/processed"
+
+dir.create(processed_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+## Read the raw data
+
+All columns are read as character, as in the download step.
+
+```{r read}
+heat_raw =
+  list.files(raw_dir, pattern = "^311_heat_.*\\.csv\\.gz$", full.names = TRUE) |>
+  map(\(f) read_csv(f, col_types = cols(.default = col_character()))) |>
+  bind_rows()
+
+stopifnot(
+  nrow(heat_raw) == 1484133,
+  n_distinct(heat_raw$unique_key) == nrow(heat_raw))
+
+heat_raw |>
+  count(season) |>
+  knitr::kable()
+```
+
+## Dates, closure time, and text clean-up
+
+`descriptor` and `descriptor_2` are converted to upper case because
+2023-24 contains mixed-case values (for example `Apartment Only`). Two
+`HEAT ON IN SUMMER` records and one `WATER SUPPLY` record are dropped.
+
+```{r parse}
+heat_df =
+  heat_raw |>
+  mutate(
+    created = ymd_hms(created_date),
+    closed  = ymd_hms(closed_date),
+    hours   = as.numeric(difftime(closed, created, units = "hours")),
+    days    = hours / 24,
+    month   = month(created),
+    descriptor   = str_to_upper(descriptor),
+    descriptor_2 = str_to_upper(descriptor_2),
+    borough      = str_to_upper(borough),
+    problem = case_when(
+      descriptor_2 == "NO HEAT"                  ~ "heat",
+      descriptor_2 == "NO HOT WATER"             ~ "hot water",
+      descriptor_2 == "NO HEAT AND NO HOT WATER" ~ "heat and hot water")) |>
+  filter(
+    descriptor_2 != "HEAT ON IN SUMMER",
+    descriptor != "WATER SUPPLY")
+
+# Every created date should parse; closed is missing only where closed_date is missing
+heat_df |>
+  summarize(
+    n_rows = n(),
+    created_missing = sum(is.na(created)),
+    closed_date_missing = sum(is.na(closed_date)),
+    closed_missing = sum(is.na(closed))) |>
+  knitr::kable()
+```
+
+## Data quality flags
+
+Complaints that are still open have no closure time. Negative closure
+times are errors and are removed in the analysis. Zero and very long
+closure times are kept but flagged.
+
+```{r flags}
+heat_df =
+  heat_df |>
+  mutate(
+    flag = case_when(
+      is.na(closed) ~ "open",
+      hours < 0     ~ "negative",
+      hours == 0    ~ "zero",
+      days > 365    ~ "over 1 year",
+      TRUE          ~ "ok"))
+
+heat_df |>
+  count(season, flag) |>
+  pivot_wider(names_from = flag, values_from = n, values_fill = 0) |>
+  knitr::kable()
+```
+
+Closure time among closed complaints:
+
+```{r closure-time}
+heat_df |>
+  filter(flag %in% c("ok", "zero", "over 1 year")) |>
+  group_by(season) |>
+  summarize(
+    n = n(),
+    median_days   = median(days),
+    p90_days      = quantile(days, 0.9),
+    pct_within_3d = mean(days <= 3)) |>
+  knitr::kable(digits = 2)
+```
+
+## Closure types
+
+`resolution_description` contains a small set of fixed HPD messages. The
+rules below sort them into closure types. Order matters: "No violations
+were issued" also contains "violations were issued", so the no-violation
+rule must come before the violation rule.
+
+```{r categories}
+heat_df =
+  heat_df |>
+  mutate(
+    res_text = str_to_lower(resolution_description),
+    res_cat = case_when(
+      is.na(res_text) ~ "missing",
+      str_detect(res_text, "duplicate") ~ "duplicate",
+      str_detect(res_text, "heat was not required") ~ "heat_not_required",
+      str_detect(res_text, "no violations were issued|did not violate") ~ "no_violation",
+      str_detect(res_text, "violations were issued|violation was issued|violations were previously issued") ~ "violation",
+      str_detect(res_text, "not able to gain access|unable to complete the inspection") ~ "no_access",
+      str_detect(res_text, "restored|corrected|addressed") ~ "restored",
+      str_detect(res_text, "conducted or attempted to conduct") ~ "inspection_unclear",
+      str_detect(res_text, "still open") ~ "still_open",
+      str_detect(res_text, "administratively") ~ "admin_closed",
+      TRUE ~ "other"),
+    res_group =
+      if_else(
+        res_cat %in% c("restored", "duplicate", "no_access", "inspection_unclear",
+                       "no_violation", "violation"),
+        res_cat, "small categories"))
+
+# Lookup table: every distinct message and its closure type (for the report appendix)
+res_map =
+  heat_df |>
+  count(res_cat, resolution_description, sort = TRUE)
+
+stopifnot(!any(res_map$res_cat == "other"))
+
+write_csv(res_map, file.path(processed_dir, "rq3_resolution_map.csv"))
+
+heat_df |>
+  group_by(res_cat) |>
+  summarize(
+    n = n(),
+    median_days = median(days, na.rm = TRUE)) |>
+  mutate(pct = n / sum(n)) |>
+  arrange(desc(n)) |>
+  knitr::kable(digits = 3)
+```
+
+Closure types by season:
+
+```{r categories-season}
+heat_df |>
+  count(season, res_group) |>
+  group_by(season) |>
+  mutate(pct = n / sum(n)) |>
+  select(-n) |>
+  pivot_wider(names_from = res_group, values_from = pct) |>
+  knitr::kable(digits = 3)
+
+heat_df |>
+  ggplot(aes(x = season, fill = res_group)) +
+  geom_bar(position = "fill") +
+  labs(x = NULL, y = "Share of complaints", fill = "Closure type")
+```
+
+Closure types by complaint scope. Building-wide complaints are more
+often closed as duplicates, so scope (and building size) must be
+controlled for when comparing income groups.
+
+```{r categories-scope}
+heat_df |>
+  count(descriptor, res_group) |>
+  group_by(descriptor) |>
+  mutate(pct = n / sum(n)) |>
+  select(-n) |>
+  pivot_wider(names_from = res_group, values_from = pct) |>
+  knitr::kable(digits = 3)
+```
+
+## First look by borough
+
+Income groups are added in the analysis step. As a first look, closed
+complaints are compared across boroughs.
+
+```{r borough}
+heat_df |>
+  filter(
+    flag %in% c("ok", "zero", "over 1 year"),
+    borough %in% c("BRONX", "BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND")) |>
+  group_by(borough) |>
+  summarize(
+    n = n(),
+    median_days   = median(days),
+    pct_duplicate = mean(res_cat == "duplicate"),
+    pct_no_access = mean(res_cat == "no_access"),
+    pct_violation = mean(res_cat == "violation")) |>
+  knitr::kable(digits = 3)
+```
+
+## Save the complaint-level dataset
+
+All rows are kept, with `flag`, so that open complaints can still be
+compared across income groups. The analysis filters on `flag`.
+
+```{r save}
+rq3_complaints =
+  heat_df |>
+  select(
+    unique_key, season, created, closed, hours, days, month, status, flag,
+    res_cat, res_group, descriptor, problem, borough, incident_zip, bbl,
+    open_data_channel_type)
+
+write_rds(rq3_complaints, file.path(processed_dir, "rq3_complaints.rds"), compress = "gz")
+
+nrow(rq3_complaints)
+```
+
+## Next steps
+
+1. Add ZCTA income quintiles from ACS (shared with RQ2), joined by
+   `incident_zip`.
+2. Add residential units from PLUTO, joined by `bbl`.
+3. Compare closure time and closure types across income quintiles, then
+   fit `lm()` and `glm(family = binomial())` models that control for
+   season, month, scope, problem type, borough, channel, and building
+   size.

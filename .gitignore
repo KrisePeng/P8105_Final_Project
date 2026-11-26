@@ -2,3 +2,5 @@
 .Rhistory
 .RData
 .Ruserdata
+Data processing/data/raw/
+Data processing/data/processed/*.rds
