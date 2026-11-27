@@ -1,0 +1,227 @@
+PLUTO: Building Size and Age by BBL
+================
+
+This file downloads the number of residential units and the year built
+for every tax lot in New York City from PLUTO (Primary Land Use Tax Lot
+Output, NYC Open Data `64uk-42ks`). Each 311 complaint has a BBL
+(borough-block-lot), so these columns can be joined to complaints. RQ3
+uses residential units to control for building size; RQ2 uses year
+built.
+
+The download follows `download_311.Rmd`: pages ordered by `bbl`, each
+page checked for status and row count, up to three retries, and a stop
+instead of saving incomplete data.
+
+``` r
+library(tidyverse)
+library(httr)
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+base_url = "https://data.cityofnewyork.us/resource/64uk-42ks.csv"
+raw_dir = "data/raw"
+processed_dir = "data/processed"
+page_size = 25000
+
+dir.create(raw_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(processed_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Optional NYC Open Data app token, stored outside the repository in ~/.Renviron
+app_token = Sys.getenv("NYC_OPEN_DATA_TOKEN")
+
+token_header =
+  if (app_token == "") add_headers() else add_headers("X-App-Token" = app_token)
+```
+
+## Field names
+
+Check that the columns we need exist before downloading.
+
+``` r
+peek_pluto =
+  GET(base_url, token_header, query = list("$limit" = 5)) |>
+  content("parsed", col_types = cols(.default = col_character()))
+
+needed_cols = c("bbl", "borough", "zipcode", "bldgclass", "landuse",
+                "unitsres", "unitstotal", "yearbuilt")
+
+needed_cols[!needed_cols %in% names(peek_pluto)]   # should be empty
+```
+
+    ## character(0)
+
+``` r
+stopifnot(all(needed_cols %in% names(peek_pluto)))
+```
+
+## Expected row count
+
+``` r
+n_expected =
+  GET(base_url, token_header, query = list("$select" = "count(*) AS n")) |>
+  content("parsed", show_col_types = FALSE) |>
+  pull(n)
+
+n_expected
+```
+
+    ## [1] 858312
+
+## Download
+
+As in the 311 download, `$limit` and `$offset` are written with
+`format(..., scientific = FALSE)` so that R does not send `1e+05`.
+
+``` r
+pluto_path = file.path(raw_dir, "pluto_raw.csv.gz")
+
+get_page = function(offset) {
+
+  n_should = min(page_size, n_expected - offset)
+
+  for (attempt in 1:3) {
+
+    Sys.sleep(2 * attempt)
+
+    response =
+      GET(base_url, token_header, timeout(300), query = list(
+        "$select" = str_c(needed_cols, collapse = ", "),
+        "$order"  = "bbl",
+        "$limit"  = format(page_size, scientific = FALSE),
+        "$offset" = format(offset, scientific = FALSE)))
+
+    if (status_code(response) == 200) {
+
+      page = content(response, "parsed", col_types = cols(.default = col_character()))
+
+      if (nrow(page) == n_should) {
+        return(page)
+      }
+    }
+
+    message("Offset ", format(offset, scientific = FALSE), ": attempt ", attempt,
+            " failed (status ", status_code(response), ")")
+  }
+
+  stop("Page at offset ", format(offset, scientific = FALSE), " failed after 3 attempts.")
+}
+
+if (file.exists(pluto_path)) {
+
+  pluto_raw = read_csv(pluto_path, col_types = cols(.default = col_character()))
+
+} else {
+
+  pluto_raw =
+    seq(0, n_expected - 1, by = page_size) |>
+    map(get_page) |>
+    bind_rows()
+
+  write_csv(pluto_raw, pluto_path)
+}
+
+stopifnot(nrow(pluto_raw) == n_expected)
+```
+
+## Clean
+
+The API may return `bbl` with trailing decimals (for example
+`1000010010.00000000`); these are removed so that `bbl` is the same
+10-digit text as in the 311 data. A year built of 0 means unknown.
+
+``` r
+pluto =
+  pluto_raw |>
+  transmute(
+    bbl        = str_remove(bbl, "\\.0+$"),
+    borough,
+    zipcode    = str_sub(zipcode, 1, 5),
+    bldgclass,
+    landuse,
+    unitsres   = as.numeric(unitsres),
+    unitstotal = as.numeric(unitstotal),
+    yearbuilt  = na_if(as.numeric(yearbuilt), 0))
+
+pluto |>
+  summarize(
+    n_rows = n(),
+    n_unique_bbl = n_distinct(bbl),
+    pct_bbl_10_digits = mean(str_detect(bbl, "^[1-5]\\d{9}$")),
+    pct_missing_units = mean(is.na(unitsres)),
+    pct_residential = mean(unitsres > 0, na.rm = TRUE),
+    pct_missing_year = mean(is.na(yearbuilt))) |>
+  knitr::kable(digits = 3)
+```
+
+| n_rows | n_unique_bbl | pct_bbl_10_digits | pct_missing_units | pct_residential | pct_missing_year |
+|---:|---:|---:|---:|---:|---:|
+| 858312 | 858312 | 1 | 0 | 0.895 | 0.047 |
+
+``` r
+# One row per BBL is required for the join
+pluto = pluto |> distinct(bbl, .keep_all = TRUE)
+```
+
+## Match to 311 heat complaints
+
+``` r
+rq3_complaints = read_rds(file.path(processed_dir, "rq3_complaints.rds"))
+
+rq3_complaints |>
+  mutate(
+    has_bbl = !is.na(bbl),
+    in_pluto = bbl %in% pluto$bbl,
+    has_units = bbl %in% filter(pluto, unitsres > 0)$bbl) |>
+  group_by(season) |>
+  summarize(
+    pct_has_bbl = mean(has_bbl),
+    pct_in_pluto = mean(in_pluto),
+    pct_with_units = mean(has_units)) |>
+  knitr::kable(digits = 4)
+```
+
+| season  | pct_has_bbl | pct_in_pluto | pct_with_units |
+|:--------|------------:|-------------:|---------------:|
+| 2020-21 |      0.9953 |       0.9925 |         0.9839 |
+| 2021-22 |      0.9948 |       0.9908 |         0.9810 |
+| 2022-23 |      0.9960 |       0.9912 |         0.9799 |
+| 2023-24 |      0.9957 |       0.9910 |         0.9823 |
+| 2024-25 |      0.9964 |       0.9912 |         0.9786 |
+| 2025-26 |      0.9965 |       0.9937 |         0.9808 |
+
+Residential units among complaint buildings (one row per building):
+
+``` r
+rq3_complaints |>
+  distinct(bbl) |>
+  inner_join(pluto, by = "bbl") |>
+  mutate(
+    size = cut(unitsres, c(-Inf, 0, 5, 20, 50, 100, Inf),
+               labels = c("0", "1-5", "6-20", "21-50", "51-100", "100+"))) |>
+  count(size) |>
+  mutate(pct = n / sum(n)) |>
+  knitr::kable(digits = 3)
+```
+
+| size   |     n |   pct |
+|:-------|------:|------:|
+| 0      |  4150 | 0.049 |
+| 1-5    | 40296 | 0.475 |
+| 6-20   | 20995 | 0.247 |
+| 21-50  | 10285 | 0.121 |
+| 51-100 |  5741 | 0.068 |
+| 100+   |  3448 | 0.041 |
+| NA     |     6 | 0.000 |
+
+## Save
+
+The cleaned file has one row per tax lot (about 860,000 rows), so it is
+saved as `.rds` and not committed; `.gitignore` already excludes
+`data/processed/*.rds` and `data/raw/`.
+
+``` r
+write_rds(pluto, file.path(processed_dir, "pluto_bbl.rds"), compress = "gz")
+```
+
+Source: NYC Department of City Planning, PLUTO (NYC Open Data
+`64uk-42ks`), retrieved on 2026-11-27.
